@@ -6,7 +6,7 @@
 #   This is mostly copied from the original check-disk.rb plugin and modified
 #   to use WMIC.  This is our first attempt at writing a plugin for Windows.
 #
-#   Uses Windows WMIC facility. Warning/critical levels are percentages only.
+#   Uses Windows WMIC facility. Warning/critical levels are percentages for small drives and GB for large drives 
 
 #
 # OUTPUT:
@@ -55,6 +55,21 @@ class CheckDisk < Sensu::Plugin::Check::CLI
          proc: proc(&:to_i),
          default: 95
 
+  option :gbcrit,
+         short: '-C GB',
+         proc: proc(&:to_i),
+         default: 100
+
+  option :gbwarn,
+         short: '-W GB',
+         proc: proc(&:to_i),
+         default: 250
+
+  option :disksize,
+          short: '-s GB',
+          proc: proc(&:to_i),
+          default: 2048
+
   def initialize
     super
     @crit_fs = []
@@ -72,28 +87,63 @@ class CheckDisk < Sensu::Plugin::Check::CLI
         next if config[:fstype] && !config[:fstype].include?(type)
         next if config[:ignoretype] && config[:ignoretype].include?(type)
         next if config[:ignoremnt] && config[:ignoremnt].include?(mnt)
-    rescue
-      unknown "malformed line from df: #{line}"
+      rescue
+        unknown "malformed line from df: #{line}"
       end
       # If label value is not set, the drive letter will end up in that column.  Set mnt to label in that case.
       mnt = label if mnt.nil?
       prct_used = (100 * (1 - (_avail.to_f / capacity.to_f)))
-      if prct_used >= config[:crit]
-        @crit_fs << "#{mnt} #{prct_used.round(2)}"
-      elsif prct_used >= config[:warn]
-        @warn_fs << "#{mnt} #{prct_used.round(2)}"
+      bytes_to_gbytes = 1073741824
+      @size = capacity.to_f / bytes_to_gbytes
+      gigs_avail = _avail.to_f / bytes_to_gbytes
+      if @size >= config[:disksize]
+        if gigs_avail <= config[:gbcrit]
+          @crit_fs << "#{mnt} #{gigs_avail.round(2)} GB free"
+        elsif gigs_avail <= config[:gbwarn]
+          @warn_fs << "#{mnt} #{gigs_avail.round(2)} GB free"
+        end
+          
+      else
+        if prct_used >= config[:crit]
+          @crit_fs << "#{mnt} #{prct_used.round(2)}%"
+        elsif prct_used >= config[:warn]
+          @warn_fs << "#{mnt} #{prct_used.round(2)}%"
+        end  
       end
     end
   end
 
-  def usage_summary
-    (@crit_fs + @warn_fs).join(', ')
+  def status
+    case
+    when @crit_fs.length >= 1
+      :critical
+    when @warn_fs.length >= 1
+      :warning
+    else
+        :ok
+    end
   end
+  
+  def usage_summary
+    case(status)
+    when :critical, :warning
+      (@crit_fs + @warn_fs).join(', ')
+    else
+      "All disks smaller than #{config[:disksize]} GB are under #{config[:warn]}% used. All larger disks have more than #{config[:gbwarn]} GB free"
+    end
 
+  end
+  
   def run
     read_wmic
-    critical usage_summary unless @crit_fs.empty?
-    warning usage_summary unless @warn_fs.empty?
-    ok "All disk usage under #{config[:warn]}%"
+    case(status)
+    when :critical
+      critical usage_summary
+    when :warning
+      warning usage_summary
+    else
+      ok usage_summary
+    end
   end
 end
+
